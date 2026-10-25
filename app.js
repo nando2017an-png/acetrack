@@ -51,6 +51,7 @@ function defaults() {
     ],
     accounts: [acc('BCA', 'bank'), acc('BNI', 'bank'), acc('Jago', 'bank'), acc('Bibit', 'invest'), acc('Tunai', 'cash')],
     expenses: [],
+    incomes: [],
     snaps: {},
     lastAcc: null,
   };
@@ -60,7 +61,9 @@ const META = 'acetrack.meta', GHK = 'acetrack.gh', SNAPK = 'acetrack.snapshots';
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch { return d; } };
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 
-let state = load(KEY, null) || defaults();
+let state = migrate(load(KEY, null) || defaults());
+// Data lama (v1.0–v1.1) belum punya daftar pemasukan.
+function migrate(d) { d.incomes = d.incomes || []; return d; }
 // meta & token GitHub disimpan terpisah supaya tidak ikut ke file backup
 let meta = load(META, {});
 let gh = load(GHK, null);
@@ -70,7 +73,7 @@ const save = () => {
   meta.dirty = true; store(META, meta); syncSoon();
 };
 const validBackup = d => d && Array.isArray(d.expenses) && Array.isArray(d.categories) && Array.isArray(d.accounts) && d.settings;
-function replaceState(d) { state = d; save(); applyTheme(); render(); }
+function replaceState(d) { state = migrate(d); save(); applyTheme(); render(); }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 const cat = id => state.categories.find(c => c.id === id);
@@ -90,6 +93,27 @@ function removeExpense(id) {
   const [e] = state.expenses.splice(i, 1);
   const a = acc(e.acc); if (a) a.balance += e.amount;
   snapshot(); save();
+}
+
+// Pemasukan menambah saldo platform tujuan; tidak memengaruhi budget.
+const INCOME_SRC = [['Gaji', '💼'], ['Bonus', '🎁'], ['Jualan', '🏷️'], ['Lainnya', '💰']];
+const srcEmoji = s => (INCOME_SRC.find(x => x[0] === s) || INCOME_SRC[3])[1];
+function addIncome(i) {
+  state.incomes.push(i);
+  const a = acc(i.acc); if (a) a.balance += i.amount;
+  snapshot(); save();
+}
+function removeIncome(id) {
+  const k = state.incomes.findIndex(i => i.id === id); if (k < 0) return;
+  const [i] = state.incomes.splice(k, 1);
+  const a = acc(i.acc); if (a) a.balance -= i.amount;
+  snapshot(); save();
+}
+// Biaya admin transfer dicatat sebagai pengeluaran cadangan.
+function adminCat() {
+  let c = cat('admin');
+  if (!c) { c = { id: 'admin', name: 'Biaya admin', emoji: '🏦', type: 'reserve' }; state.categories.push(c); }
+  return c;
 }
 
 /* ---------- Model budget ----------
@@ -144,7 +168,7 @@ function viewHome() {
   const spent = dailySpent(t), left = D - spent;
   const mb = monthBudget(t.slice(0, 7));
   const pct = Math.min(100, D ? spent / D * 100 : 0);
-  const recent = [...state.expenses].sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).slice(0, 5);
+  const recent = merged(state.expenses, state.incomes).slice(0, 5);
   const due = backupDue();
 
   return `
@@ -180,16 +204,31 @@ function viewHome() {
     <button class="cat add" data-act="cat-edit"><span class="emo">＋</span><span>Kategori</span></button>
   </div>
   <p class="legend"><span class="r dot">Titik abu = dari cadangan</span></p>
+  <button class="btn block" data-act="income" style="margin-top:12px">＋ Catat pemasukan</button>
 
   <h2>Terakhir dicatat</h2>
   <div class="list">
-    ${recent.length ? recent.map(rowExpense).join('') : '<p class="empty">Belum ada catatan. Tap kategori di atas untuk mulai.</p>'}
+    ${recent.length ? recent.map(x => row(x)).join('') : '<p class="empty">Belum ada catatan. Tap kategori di atas untuk mulai.</p>'}
   </div>`;
+}
+// Gabungkan pengeluaran & pemasukan, terbaru di atas. _k: 'e' pengeluaran, 'i' pemasukan.
+function merged(exps, incs = []) {
+  return [...exps.map(e => ({ ...e, _k: 'e' })), ...incs.map(i => ({ ...i, _k: 'i' }))]
+    .sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
+}
+const row = (x, showDate = true) => x._k === 'i' ? rowIncome(x, showDate) : rowExpense(x, showDate);
+function rowIncome(i, showDate = true) {
+  const a = acc(i.acc);
+  const meta = [showDate ? midDate(i.date) : '', a ? 'ke ' + esc(a.name) : '', i.note ? esc(i.note) : ''].filter(Boolean).join(' · ');
+  return `<button class="row" data-act="edit-income" data-id="${i.id}">
+    <span class="emo">${srcEmoji(i.src)}</span>
+    <span class="grow"><p class="t">${esc(i.src || 'Pemasukan')}</p>${meta ? `<p class="s">${meta}</p>` : ''}</span>
+    <span class="v num good">+${rp(i.amount)}</span></button>`;
 }
 function rowExpense(e, showDate = true) {
   const c = cat(e.cat) || { emoji: '❔', name: 'Tanpa kategori' };
   const a = acc(e.acc);
-  const meta = [showDate ? midDate(e.date) : '', a ? a.name : '', e.note ? esc(e.note) : ''].filter(Boolean).join(' · ');
+  const meta = [showDate ? midDate(e.date) : '', a ? esc(a.name) : '', e.note ? esc(e.note) : ''].filter(Boolean).join(' · ');
   return `<button class="row" data-act="edit" data-id="${e.id}">
     <span class="emo">${esc(c.emoji)}</span>
     <span class="grow"><p class="t">${esc(c.name)}</p>${meta ? `<p class="s">${meta}</p>` : ''}</span>
@@ -201,24 +240,43 @@ let pad;
 function openPad(catId, existing) {
   const e = existing;
   pad = {
-    id: e?.id, cat: e?.cat || catId, amount: e ? String(e.amount) : '',
+    kind: 'e', id: e?.id, cat: e?.cat || catId, amount: e ? String(e.amount) : '',
     acc: e ? e.acc : (state.lastAcc && acc(state.lastAcc) ? state.lastAcc : null),
     note: e?.note || '', date: e?.date || today(),
   };
   openSheet(padHTML());
 }
+function openIncome(existing) {
+  const i = existing;
+  if (!state.accounts.length) { toast('Tambahkan platform dulu di tab Aset'); return; }
+  const def = acc(state.lastIncAcc) ? state.lastIncAcc : state.accounts[0].id;
+  pad = {
+    kind: 'i', id: i?.id, src: i?.src || 'Gaji', amount: i ? String(i.amount) : '',
+    acc: i ? i.acc : def, note: i?.note || '', date: i?.date || today(),
+  };
+  openSheet(padHTML());
+}
 function padHTML() {
+  const inc = pad.kind === 'i';
   const c = cat(pad.cat) || { emoji: '❔', name: 'Tanpa kategori' };
   const n = Number(pad.amount) || 0;
-  const accs = [...state.accounts].sort((a, b) => (a.group === 'invest') - (b.group === 'invest'));
+  const order = inc ? { bank: 0, cash: 1, invest: 2 } : { bank: 0, cash: 0, invest: 1 };
+  const accs = [...state.accounts].sort((a, b) => order[a.group] - order[b.group]);
+  const quick = inc ? [10000, 50000, 100000, 500000, 1000000] : [2000, 5000, 10000, 20000, 50000];
   return `
-  <h3><span>${esc(c.emoji)}</span>${esc(c.name)}<span class="small" style="margin:0 0 0 auto">${c.type === 'reserve' ? 'Cadangan' : 'Harian'}</span></h3>
-  <p class="amount num ${n ? '' : 'zero'}" id="pad-amount">${rp(n)}</p>
+  ${inc
+    ? `<h3><span>${srcEmoji(pad.src)}</span>Pemasukan<span class="small good" style="margin:0 0 0 auto">Menambah saldo</span></h3>`
+    : `<h3><span>${esc(c.emoji)}</span>${esc(c.name)}<span class="small" style="margin:0 0 0 auto">${c.type === 'reserve' ? 'Cadangan' : 'Harian'}</span></h3>`}
+  <p class="amount num ${n ? '' : 'zero'} ${inc && n ? 'good' : ''}" id="pad-amount">${rp(n)}</p>
   <div class="chips">
-    ${[2000, 5000, 10000, 20000, 50000].map(v => `<button class="chip" data-act="pad-quick" data-v="${v}">+${short(v)}</button>`).join('')}
+    ${quick.map(v => `<button class="chip" data-act="pad-quick" data-v="${v}">+${short(v)}</button>`).join('')}
   </div>
-  <div class="chips" aria-label="Sumber dana">
-    <button class="chip ${pad.acc ? '' : 'on'}" data-act="pad-acc" data-id="">Tanpa sumber</button>
+  ${inc ? `<div class="chips" aria-label="Jenis pemasukan">
+    ${INCOME_SRC.map(([s, emo]) => `<button class="chip ${pad.src === s ? 'on' : ''}" data-act="pad-src" data-s="${s}">${emo} ${s}</button>`).join('')}
+  </div>` : ''}
+  <p class="small" style="margin:2px 0 4px">${inc ? 'Masuk ke' : 'Sumber dana'}</p>
+  <div class="chips" aria-label="${inc ? 'Masuk ke' : 'Sumber dana'}">
+    ${inc ? '' : `<button class="chip ${pad.acc ? '' : 'on'}" data-act="pad-acc" data-id="">Tanpa sumber</button>`}
     ${accs.map(a => `<button class="chip ${pad.acc === a.id ? 'on' : ''}" data-act="pad-acc" data-id="${a.id}">${esc(a.name)}<span class="bal num">${short(a.balance)}</span></button>`).join('')}
   </div>
   <div class="pad">
@@ -239,16 +297,25 @@ function padHTML() {
 function padRefresh() {
   const el = $('#pad-amount'); const n = Number(pad.amount) || 0;
   el.textContent = rp(n); el.classList.toggle('zero', !n);
+  el.classList.toggle('good', pad.kind === 'i' && !!n);
 }
 function padSave() {
   const n = Number(pad.amount) || 0;
   if (!n) { toast('Masukkan nominal dulu'); return; }
   pad.note = $('#pad-note').value.trim();
   pad.date = $('#pad-date').value || today();
-  if (pad.id) removeExpense(pad.id);
-  addExpense({ id: pad.id || uid(), amount: n, cat: pad.cat, acc: pad.acc || null, note: pad.note, date: pad.date, ts: Date.now() });
+  if (pad.kind === 'i') {
+    if (!acc(pad.acc)) { toast('Pilih platform tujuan'); return; }
+    if (pad.id) removeIncome(pad.id);
+    state.lastIncAcc = pad.acc;
+    addIncome({ id: pad.id || uid(), amount: n, src: pad.src, acc: pad.acc, note: pad.note, date: pad.date, ts: Date.now() });
+    toast(`+${rp(n)} masuk ke ${acc(pad.acc).name}`);
+  } else {
+    if (pad.id) removeExpense(pad.id);
+    addExpense({ id: pad.id || uid(), amount: n, cat: pad.cat, acc: pad.acc || null, note: pad.note, date: pad.date, ts: Date.now() });
+    toast(`${rp(n)} tercatat`);
+  }
   closeSheet();
-  toast(`${rp(n)} tercatat`);
   render();
 }
 
@@ -293,6 +360,8 @@ function viewReport() {
   }
 
   const list = inRange(from, to);
+  const incs = state.incomes.filter(i => i.date >= from && i.date <= to);
+  const incTotal = incs.reduce((s, i) => s + i.amount, 0);
   const tot = sumBy(list), total = tot.daily + tot.reserve;
   const byCat = {};
   for (const e of list) byCat[e.cat] = (byCat[e.cat] || 0) + e.amount;
@@ -322,6 +391,7 @@ function viewReport() {
     <p class="big num ${total > budget ? 'danger' : ''}">${rp(total)}</p>
     <p class="small num">dari budget ${rp(budget)}</p>
     ${extra}
+    ${incTotal ? `<p class="small num">Pemasukan <span class="good">+${rp(incTotal)}</span> · selisih ${rp(incTotal - total)}</p>` : ''}
     ${bars.length ? chart(bars, limit, tapMode) + `<p class="legend"><span>Harian</span><span class="r">Cadangan</span><span style="color:var(--danger)">- - ${mode === 'year' ? 'budget bulanan (±30 hari)' : 'jatah harian'}</span></p>` : ''}
   </div>
 
@@ -336,27 +406,29 @@ function viewReport() {
   </div>
 
   <h2>Transaksi</h2>
-  <div class="list">${txList(list, mode)}</div>`;
+  <div class="list">${txList(list, incs, mode)}</div>`;
 }
-function txList(list, mode) {
-  if (!list.length) return '<p class="empty">Tidak ada transaksi.</p>';
-  const sorted = [...list].sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts);
-  if (mode === 'day') return sorted.map(e => rowExpense(e, false)).join('');
+function txList(list, incs, mode) {
+  const sorted = merged(list, incs);
+  if (!sorted.length) return '<p class="empty">Tidak ada transaksi.</p>';
+  const out$ = xs => xs.filter(x => x._k === 'e').reduce((s, x) => s + x.amount, 0);
+  const in$ = xs => xs.filter(x => x._k === 'i').reduce((s, x) => s + x.amount, 0);
+  const sums = xs => `${in$(xs) ? `<span class="good">+${short(in$(xs))}</span> · ` : ''}-${short(out$(xs))}`;
+  if (mode === 'day') return sorted.map(x => row(x, false)).join('');
   if (mode === 'year') {
     const byM = {};
-    for (const e of sorted) { const k = e.date.slice(0, 7); (byM[k] = byM[k] || []).push(e); }
-    return Object.entries(byM).map(([k, es]) => `<button class="row" data-act="rep-goto" data-mode="month" data-key="${k}-01">
-      <span class="grow"><p class="t">${MONTHS[Number(k.slice(5)) - 1]}</p><p class="s">${es.length} transaksi</p></span>
-      <span class="v num">${rp(es.reduce((s, e) => s + e.amount, 0))}</span></button>`).join('');
+    for (const x of sorted) { const k = x.date.slice(0, 7); (byM[k] = byM[k] || []).push(x); }
+    return Object.entries(byM).map(([k, xs]) => `<button class="row" data-act="rep-goto" data-mode="month" data-key="${k}-01">
+      <span class="grow"><p class="t">${MONTHS[Number(k.slice(5)) - 1]}</p><p class="s">${xs.length} transaksi</p></span>
+      <span class="v num">${sums(xs)}</span></button>`).join('');
   }
   let out = '', cur = '';
-  for (const e of sorted) {
-    if (e.date !== cur) {
-      cur = e.date;
-      const sum = sorted.filter(x => x.date === cur).reduce((s, x) => s + x.amount, 0);
-      out += `<div class="day-head"><span>${longDate(cur)}</span><span class="num">${rp(sum)}</span></div>`;
+  for (const x of sorted) {
+    if (x.date !== cur) {
+      cur = x.date;
+      out += `<div class="day-head"><span>${longDate(cur)}</span><span class="num">${sums(sorted.filter(y => y.date === cur))}</span></div>`;
     }
-    out += rowExpense(e, false);
+    out += row(x, false);
   }
   return out;
 }
@@ -424,7 +496,7 @@ function viewAssets() {
     <button class="btn" data-act="transfer">⇄ Transfer</button>
   </div>
   ${groups || '<p class="empty">Belum ada platform. Tambahkan BCA, Jago, Bibit, dan lainnya.</p>'}
-  <p class="small" style="margin-top:12px">Tap platform untuk mengubah saldo, misalnya saat gaji masuk atau nilai investasi berubah. Pengeluaran otomatis mengurangi saldo sumber dananya.</p>`;
+  <p class="small" style="margin-top:12px">Pemasukan (Beranda → Catat pemasukan) menambah saldo, pengeluaran menguranginya. Tap platform untuk menyesuaikan saldo, misalnya saat nilai investasi berubah.</p>`;
 }
 function trend(keys) {
   const pts = keys.slice(-90).map(k => state.snaps[k]);
@@ -454,6 +526,11 @@ function transferSheet() {
   <label class="field"><span>Dari</span><select class="in" id="t-from">${opts(state.accounts[0]?.id)}</select></label>
   <label class="field"><span>Ke</span><select class="in" id="t-to">${opts(state.accounts[1]?.id)}</select></label>
   <label class="field"><span>Nominal (Rp)</span><input class="in num" id="t-amt" inputmode="numeric" placeholder="0" data-money></label>
+  <label class="field"><span>Biaya admin (Rp)</span><input class="in num" id="t-fee" inputmode="numeric" placeholder="0" data-money></label>
+  <div class="chips">
+    ${[0, 1000, 2500, 6500].map(v => `<button class="chip" data-act="fee-quick" data-v="${v}">${v ? rp(v) : 'Gratis'}</button>`).join('')}
+  </div>
+  <p class="small">Biaya admin dipotong dari platform asal dan dicatat sebagai pengeluaran "Biaya admin" (cadangan).</p>
   <div class="actions"><button class="btn primary" data-act="transfer-save">Transfer</button></div>`);
 }
 
@@ -526,7 +603,7 @@ function viewSettings() {
       <text x="430" y="205" style="font:700 88px 'Space Grotesk',sans-serif">AceCore</text>
       <text x="434" y="268" style="font:500 34px 'JetBrains Mono',monospace;letter-spacing:16px">NEXUS</text>
     </svg>
-    <p class="small">AceTrack v1.1 · pencatat pengeluaran dan aset pribadi</p>
+    <p class="small">AceTrack v1.2 · pencatat pengeluaran dan aset pribadi</p>
   </div>`;
 }
 function catSheet(id) {
@@ -724,7 +801,15 @@ const actions = {
   'pad-save': () => padSave(),
   'pad-delete': () => {
     if (!confirm('Hapus catatan ini?')) return;
-    removeExpense(pad.id); closeSheet(); toast('Catatan dihapus'); render();
+    if (pad.kind === 'i') removeIncome(pad.id); else removeExpense(pad.id);
+    closeSheet(); toast('Catatan dihapus'); render();
+  },
+  'income': () => openIncome(),
+  'edit-income': d => { const i = state.incomes.find(x => x.id === d.id); if (i) openIncome(i); },
+  'pad-src': (d, el) => {
+    pad.src = d.s;
+    el.parentElement.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el));
+    $('#sheet h3 span').textContent = srcEmoji(d.s);
   },
   'rep-mode': d => { rep.mode = d.m; render(); },
   'rep-step': d => { repStep(Number(d.d)); render(); },
@@ -750,12 +835,17 @@ const actions = {
     transferSheet();
   },
   'transfer-save': () => {
-    const from = acc($('#t-from').value), to = acc($('#t-to').value), n = parseNum($('#t-amt').value);
+    const from = acc($('#t-from').value), to = acc($('#t-to').value);
+    const n = parseNum($('#t-amt').value), fee = parseNum($('#t-fee').value);
     if (from === to) { toast('Pilih dua platform yang berbeda'); return; }
     if (!n) { toast('Masukkan nominal'); return; }
     from.balance -= n; to.balance += n;
-    snapshot(); save(); closeSheet(); render(); toast(`${rp(n)} dipindah ke ${to.name}`);
+    if (fee) addExpense({ id: uid(), amount: fee, cat: adminCat().id, acc: from.id, note: `Transfer ke ${to.name}`, date: today(), ts: Date.now() });
+    else { snapshot(); save(); }
+    closeSheet(); render();
+    toast(`${rp(n)} dipindah ke ${to.name}${fee ? ` · admin ${rp(fee)}` : ''}`);
   },
+  'fee-quick': d => { const v = Number(d.v); $('#t-fee').value = v ? v.toLocaleString('id-ID') : ''; },
   'cat-edit': d => catSheet(d.id),
   'cat-save': d => {
     const name = $('#c-name').value.trim();
