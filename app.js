@@ -20,6 +20,7 @@ function short(n) {
   return s + Math.round(a);
 }
 const DAYS = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
+const DAYS_FULL = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 const MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 const longDate = s => { const d = parse(s); return `${DAYS[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`; };
 const midDate = s => { const d = parse(s); return `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`; };
@@ -62,8 +63,8 @@ const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; 
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 
 let state = migrate(load(KEY, null) || defaults());
-// Data lama (v1.0–v1.1) belum punya daftar pemasukan.
-function migrate(d) { d.incomes = d.incomes || []; return d; }
+// Data versi lama belum punya sebagian daftar ini.
+function migrate(d) { for (const k of ['incomes', 'loans', 'adjusts', 'transfers']) d[k] = d[k] || []; return d; }
 // meta & token GitHub disimpan terpisah supaya tidak ikut ke file backup
 let meta = load(META, {});
 let gh = load(GHK, null);
@@ -78,7 +79,9 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 
 const cat = id => state.categories.find(c => c.id === id);
 const acc = id => state.accounts.find(a => a.id === id);
-const totalAssets = () => state.accounts.reduce((s, a) => s + a.balance, 0);
+// Uang yang dipinjam orang tetap dihitung sebagai aset sampai dikembalikan.
+const loanOut = () => state.loans.filter(l => !l.back).reduce((s, l) => s + l.amount, 0);
+const totalAssets = () => state.accounts.reduce((s, a) => s + a.balance, 0) + loanOut();
 const snapshot = () => { state.snaps[today()] = totalAssets(); };
 const isReserve = e => cat(e.cat)?.type === 'reserve';
 
@@ -144,6 +147,62 @@ function dailySpent(ds) {
   return state.expenses.filter(e => e.date === ds && !isReserve(e)).reduce((s, e) => s + e.amount, 0);
 }
 
+/* ---------- Insight ----------
+   Muncul setelah 3 hari mencatat di bulan ini. Proyeksi = sisa cadangan sekarang
+   + sisa jatah hari ini + (jatah − rata-rata harian) × sisa hari − laju pemakaian cadangan × sisa hari. */
+function insights() {
+  const t = today(), ym = t.slice(0, 7), D = state.settings.daily;
+  if (state.start > t) return null;
+  const first = state.start > `${ym}-01` ? state.start : `${ym}-01`;
+  const elapsed = Math.round((parse(t) - parse(first)) / DAY_MS) + 1;
+  if (elapsed < 3) return null;
+  const byDay = {};
+  for (const e of state.expenses) if (!isReserve(e)) byDay[e.date] = (byDay[e.date] || 0) + e.amount;
+  const spent = ds => byDay[ds] || 0;
+
+  let sum = 0;
+  for (let ds = first; ds <= t; ds = addDays(ds, 1)) sum += spent(ds);
+  const avg = sum / elapsed;
+  const mb = monthBudget(ym);
+  const rest = daysIn(ym) - parse(t).getDate();
+  const proj = mb.left + Math.max(0, D - spent(t)) + rest * (D - avg) - rest * (mb.reserveSpent / elapsed);
+
+  let streak = 0;
+  for (let ds = addDays(t, -1), n = 0; ds >= state.start && n < 400; ds = addDays(ds, -1), n++) {
+    if (spent(ds) > D) break;
+    streak++;
+  }
+
+  // Hari paling boros: rata-rata semua pengeluaran per hari-dalam-minggu, 8 minggu terakhir.
+  const from = [addDays(t, -55), state.start].sort()[1];
+  const dowSum = Array(7).fill(0), dowCnt = Array(7).fill(0), all = {};
+  for (const e of state.expenses) if (e.date >= from && e.date <= t) all[e.date] = (all[e.date] || 0) + e.amount;
+  for (let ds = from; ds <= t; ds = addDays(ds, 1)) { const w = parse(ds).getDay(); dowSum[w] += all[ds] || 0; dowCnt[w]++; }
+  const dowAvg = dowSum.map((s, i) => dowCnt[i] ? s / dowCnt[i] : 0);
+  const dow = dowAvg.indexOf(Math.max(...dowAvg));
+
+  const byCat = {};
+  let monthTotal = 0;
+  for (const e of state.expenses) if (e.date.startsWith(ym) && e.date <= t) { byCat[e.cat] = (byCat[e.cat] || 0) + e.amount; monthTotal += e.amount; }
+  const top = Object.entries(byCat).sort((a, b) => b[1] - a[1])[0];
+
+  return { proj, avg, streak, rest, dow, dowAvg: dowAvg[dow], top, monthTotal, D };
+}
+function insightSheet() {
+  const i = insights(); if (!i) return;
+  const c = i.top && (cat(i.top[0]) || { emoji: '❔', name: 'Tanpa kategori' });
+  const item = (t, v, s) => `<div class="row"><span class="grow"><p class="t">${t}</p>${s ? `<p class="s">${s}</p>` : ''}</span><span class="v num">${v}</span></div>`;
+  openSheet(`
+  <h3>Ringkasan ${MONTHS[parse(today()).getMonth()]}</h3>
+  <div class="list" style="margin-top:12px">
+    ${item('Proyeksi sisa cadangan', `<span class="${i.proj < 0 ? 'danger' : ''}">±${rp(i.proj)}</span>`, `Akhir bulan, kalau pola belanja tetap · ${i.rest} hari lagi`)}
+    ${item('Rata-rata harian', rp(i.avg), `Jatah ${rp(i.D)} per hari`)}
+    ${item('Hemat berturut-turut', `${i.streak} hari`, 'Hari di bawah jatah harian, sampai kemarin')}
+    ${i.dowAvg ? item('Hari paling boros', DAYS_FULL[i.dow], `Rata-rata ${rp(i.dowAvg)} · 8 minggu terakhir`) : ''}
+    ${c ? item('Kategori terbesar', `${esc(c.emoji)} ${short(i.top[1])}`, `${esc(c.name)} · ${Math.round(i.top[1] / i.monthTotal * 100)}% pengeluaran bulan ini`) : ''}
+  </div>`);
+}
+
 /* ---------- Router ---------- */
 const TABS = ['beranda', 'laporan', 'aset', 'atur'];
 let tab = 'beranda';
@@ -170,6 +229,7 @@ function viewHome() {
   const pct = Math.min(100, D ? spent / D * 100 : 0);
   const recent = merged(state.expenses, state.incomes).slice(0, 5);
   const due = backupDue();
+  const ins = insights();
 
   return `
   ${due ? `<div class="card notice">
@@ -192,6 +252,7 @@ function viewHome() {
     <p class="mid num ${mb.left < 0 ? 'danger' : ''}">${rp(mb.left)}</p>
     <div class="bar"><i class="${mb.left < 0 ? 'over' : ''}" style="width:${Math.max(0, Math.min(100, (mb.base + mb.added - mb.left) / Math.max(1, mb.base + mb.added) * 100))}%"></i></div>
     <p class="small num">Awal ${short(mb.base)} · sisa harian +${short(mb.added)} · terpakai ${short(mb.reserveSpent + mb.overflow)}</p>
+    ${ins ? `<button class="insight num" data-act="insight"><span>Proyeksi akhir bulan <b class="${ins.proj < 0 ? 'danger' : ''}">±${rp(ins.proj)}</b></span><span aria-hidden="true">›</span></button>` : ''}
   </div>
 
   <h2>Catat pengeluaran</h2>
@@ -362,6 +423,7 @@ function viewReport() {
   const list = inRange(from, to);
   const incs = state.incomes.filter(i => i.date >= from && i.date <= to);
   const incTotal = incs.reduce((s, i) => s + i.amount, 0);
+  const adjTotal = state.adjusts.filter(a => a.kind === 'adj' && a.date >= from && a.date <= to).reduce((s, a) => s + a.amount, 0);
   const tot = sumBy(list), total = tot.daily + tot.reserve;
   const byCat = {};
   for (const e of list) byCat[e.cat] = (byCat[e.cat] || 0) + e.amount;
@@ -392,6 +454,7 @@ function viewReport() {
     <p class="small num">dari budget ${rp(budget)}</p>
     ${extra}
     ${incTotal ? `<p class="small num">Pemasukan <span class="good">+${rp(incTotal)}</span> · selisih ${rp(incTotal - total)}</p>` : ''}
+    ${adjTotal ? `<p class="small num">Penyesuaian saldo ${adjTotal > 0 ? '+' : ''}${rp(adjTotal)} <span style="color:var(--faint)">(di luar catatan)</span></p>` : ''}
     ${bars.length ? chart(bars, limit, tapMode) + `<p class="legend"><span>Harian</span><span class="r">Cadangan</span><span style="color:var(--danger)">- - ${mode === 'year' ? 'budget bulanan (±30 hari)' : 'jatah harian'}</span></p>` : ''}
   </div>
 
@@ -484,20 +547,99 @@ function viewAssets() {
       <span class="v num ${a.balance < 0 ? 'danger' : ''}">${rp(a.balance)}</span></button>`).join('')}</div>`;
   }).join('');
 
+  const open = state.loans.filter(l => !l.back).sort((a, b) => b.date.localeCompare(a.date));
+  const done = state.loans.length - open.length;
+  const gain = state.adjusts.filter(a => a.kind === 'gain' && a.date >= monthStart).reduce((s, a) => s + a.amount, 0);
+  const loans = open.length || done ? `
+  <h2 style="display:flex;justify-content:space-between"><span>Piutang</span><span class="num">${rp(loanOut())}</span></h2>
+  <div class="list">
+    ${open.map(l => `<button class="row" data-act="loan-view" data-id="${l.id}">
+      <span class="badge">${esc(l.who.slice(0, 2).toUpperCase())}</span>
+      <span class="grow"><p class="t">${esc(l.who)}</p><p class="s">${midDate(l.date)} · dari ${esc(acc(l.from)?.name || '?')}${l.note ? ' · ' + esc(l.note) : ''}</p></span>
+      <span class="v num">${rp(l.amount)}</span></button>`).join('') || '<p class="empty">Semua piutang sudah kembali.</p>'}
+  </div>
+  ${done ? `<button class="link" data-act="loan-history" style="margin-top:8px">Sudah kembali (${done})</button>` : ''}` : '';
+
   return `
   <div class="card">
     <p class="label">Total aset</p>
     <p class="big num">${rp(total)}</p>
     ${delta}
+    ${loanOut() ? `<p class="small num">Termasuk piutang ${rp(loanOut())}</p>` : ''}
+    ${gain ? `<p class="small num">Investasi bulan ini <span class="${gain >= 0 ? 'good' : 'danger'}">${gain >= 0 ? '+' : ''}${rp(gain)}</span></p>` : ''}
     ${trend(keys)}
   </div>
   <div class="actions">
     <button class="btn" data-act="acc-edit">＋ Platform</button>
     <button class="btn" data-act="transfer">⇄ Transfer</button>
+    <button class="btn" data-act="loan-new">↗ Pinjamkan</button>
   </div>
   ${groups || '<p class="empty">Belum ada platform. Tambahkan BCA, Jago, Bibit, dan lainnya.</p>'}
-  <p class="small" style="margin-top:12px">Pemasukan (Beranda → Catat pemasukan) menambah saldo, pengeluaran menguranginya. Tap platform untuk menyesuaikan saldo, misalnya saat nilai investasi berubah.</p>`;
+  ${loans}
+  <p class="small" style="margin-top:12px">Tap platform untuk melihat riwayat atau menyesuaikan saldo. Selisihnya dicatat sebagai penyesuaian (untuk investasi: naik/turun nilai).</p>`;
 }
+
+/* ---------- Riwayat platform ---------- */
+function accHistory(id) {
+  const h = [], name = x => esc(acc(x)?.name || '?');
+  for (const e of state.expenses) if (e.acc === id) h.push({ d: e.date, ts: e.ts, t: esc(cat(e.cat)?.name || 'Pengeluaran'), v: -e.amount });
+  for (const i of state.incomes) if (i.acc === id) h.push({ d: i.date, ts: i.ts, t: esc(i.src || 'Pemasukan'), v: i.amount });
+  for (const x of state.transfers) {
+    if (x.from === id) h.push({ d: x.date, ts: x.ts, t: `Transfer ke ${name(x.to)}`, v: -x.amount });
+    if (x.to === id) h.push({ d: x.date, ts: x.ts, t: `Transfer dari ${name(x.from)}`, v: x.amount });
+  }
+  for (const l of state.loans) {
+    if (l.from === id) h.push({ d: l.date, ts: l.ts, t: `Dipinjam ${esc(l.who)}`, v: -l.amount });
+    if (l.back?.to === id) h.push({ d: l.back.date, ts: l.back.ts, t: `Kembali dari ${esc(l.who)}`, v: l.amount });
+  }
+  const ADJ = { adj: 'Penyesuaian', init: 'Saldo awal' };
+  for (const a of state.adjusts) if (a.acc === id) {
+    const t = a.kind === 'gain' ? (a.amount >= 0 ? 'Nilai naik' : 'Nilai turun') : ADJ[a.kind];
+    h.push({ d: a.date, ts: a.ts, t: t + (a.note ? ' · ' + esc(a.note) : ''), v: a.amount });
+  }
+  return h.sort((a, b) => b.d.localeCompare(a.d) || b.ts - a.ts).slice(0, 10);
+}
+
+/* ---------- Piutang ---------- */
+function loanNewSheet() {
+  if (!state.accounts.length) { toast('Tambahkan platform dulu'); return; }
+  openSheet(`
+  <h3>Pinjamkan uang</h3>
+  <label class="field"><span>Dipinjam oleh</span><input class="in" id="l-who" placeholder="Rafi" maxlength="24"></label>
+  <label class="field"><span>Nominal (Rp)</span><input class="in num" id="l-amt" inputmode="numeric" placeholder="0" data-money></label>
+  <label class="field"><span>Diambil dari</span><select class="in" id="l-from">${accOpts(state.lastAcc)}</select></label>
+  <div class="meta">
+    <input class="in" id="l-note" placeholder="Catatan (opsional)" maxlength="60">
+    <input class="in" id="l-date" type="date" value="${today()}" style="flex:0 0 150px">
+  </div>
+  <p class="small">Saldo platform berkurang, tapi total aset tetap karena uangnya masih milikmu. Tidak dihitung sebagai pengeluaran.</p>
+  <div class="actions"><button class="btn primary" data-act="loan-save">Simpan</button></div>`);
+}
+function loanViewSheet(id) {
+  const l = state.loans.find(x => x.id === id); if (!l) return;
+  openSheet(`
+  <h3>${esc(l.who)}<span class="small" style="margin:0 0 0 auto">${l.back ? 'Sudah kembali' : 'Belum kembali'}</span></h3>
+  <p class="amount num">${rp(l.amount)}</p>
+  <p class="small">Dipinjam ${longDate(l.date)} dari ${esc(acc(l.from)?.name || '?')}${l.note ? ` · ${esc(l.note)}` : ''}</p>
+  ${l.back
+    ? `<p class="small">Dikembalikan ${longDate(l.back.date)} ke ${esc(acc(l.back.to)?.name || '?')}</p>
+       <div class="actions"><button class="btn danger-btn" data-act="loan-delete" data-id="${id}">Hapus catatan</button></div>`
+    : `<label class="field"><span>Dikembalikan ke</span><select class="in" id="l-to">${accOpts(l.from)}</select></label>
+       <div class="actions">
+         <button class="btn danger-btn" data-act="loan-delete" data-id="${id}">Hapus</button>
+         <button class="btn primary" data-act="loan-back" data-id="${id}" style="flex:2">Sudah dikembalikan</button>
+       </div>`}`);
+}
+function loanHistorySheet() {
+  const done = state.loans.filter(l => l.back).sort((a, b) => b.back.date.localeCompare(a.back.date));
+  openSheet(`
+  <h3>Piutang yang sudah kembali</h3>
+  <div class="list" style="margin-top:12px">${done.map(l => `<button class="row" data-act="loan-view" data-id="${l.id}">
+    <span class="badge">${esc(l.who.slice(0, 2).toUpperCase())}</span>
+    <span class="grow"><p class="t">${esc(l.who)}</p><p class="s">${midDate(l.date)} → ${midDate(l.back.date)} · ke ${esc(acc(l.back.to)?.name || '?')}</p></span>
+    <span class="v num">${rp(l.amount)}</span></button>`).join('')}</div>`);
+}
+const accOpts = sel => state.accounts.map(a => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)} (${short(a.balance)})</option>`).join('');
 function trend(keys) {
   const pts = keys.slice(-90).map(k => state.snaps[k]);
   if (pts.length < 2) return '';
@@ -514,17 +656,20 @@ function accSheet(id) {
     ${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${a.group === k ? 'selected' : ''}>${l}</option>`).join('')}
   </select></label>
   <label class="field"><span>Saldo / nilai sekarang (Rp)</span><input class="in num" id="a-bal" inputmode="numeric" value="${a.balance ? Math.round(a.balance).toLocaleString('id-ID') : ''}" placeholder="0" data-money></label>
+  ${id ? `<label class="field"><span>Keterangan kalau saldo berubah (opsional)</span><input class="in" id="a-note" placeholder="${a.group === 'invest' ? 'update nilai Bibit' : 'lupa dicatat'}" maxlength="40"></label>` : ''}
   <div class="actions">
     ${id ? `<button class="btn danger-btn" data-act="acc-delete" data-id="${id}">Hapus</button>` : ''}
     <button class="btn primary" data-act="acc-save" data-id="${id || ''}" style="flex:2">Simpan</button>
-  </div>`);
+  </div>
+  ${id ? (h => `<h2>Riwayat</h2><div class="list">${h.length ? h.map(x => `<div class="row">
+    <span class="grow"><p class="t">${x.t}</p><p class="s">${midDate(x.d)}</p></span>
+    <span class="v num ${x.v > 0 ? 'good' : ''}">${x.v > 0 ? '+' : ''}${rp(x.v)}</span></div>`).join('') : '<p class="empty">Belum ada riwayat.</p>'}</div>`)(accHistory(id)) : ''}`);
 }
 function transferSheet() {
-  const opts = sel => state.accounts.map(a => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)} (${short(a.balance)})</option>`).join('');
   openSheet(`
   <h3>Transfer antar platform</h3>
-  <label class="field"><span>Dari</span><select class="in" id="t-from">${opts(state.accounts[0]?.id)}</select></label>
-  <label class="field"><span>Ke</span><select class="in" id="t-to">${opts(state.accounts[1]?.id)}</select></label>
+  <label class="field"><span>Dari</span><select class="in" id="t-from">${accOpts(state.accounts[0]?.id)}</select></label>
+  <label class="field"><span>Ke</span><select class="in" id="t-to">${accOpts(state.accounts[1]?.id)}</select></label>
   <label class="field"><span>Nominal (Rp)</span><input class="in num" id="t-amt" inputmode="numeric" placeholder="0" data-money></label>
   <label class="field"><span>Biaya admin (Rp)</span><input class="in num" id="t-fee" inputmode="numeric" placeholder="0" data-money></label>
   <div class="chips">
@@ -603,7 +748,7 @@ function viewSettings() {
       <text x="430" y="205" style="font:700 88px 'Space Grotesk',sans-serif">AceCore</text>
       <text x="434" y="268" style="font:500 34px 'JetBrains Mono',monospace;letter-spacing:16px">NEXUS</text>
     </svg>
-    <p class="small">AceTrack v1.2 · pencatat pengeluaran dan aset pribadi</p>
+    <p class="small">AceTrack v1.3 · pencatat pengeluaran dan aset pribadi</p>
   </div>`;
 }
 function catSheet(id) {
@@ -763,8 +908,9 @@ function toast(msg) {
 document.addEventListener('input', ev => {
   const el = ev.target;
   if (el.matches('[data-money]')) {
-    const n = parseNum(el.value);
-    el.value = n ? n.toLocaleString('id-ID') : '';
+    // Tanda minus di depan dipertahankan (saldo bisa minus); parseNum sendiri mengabaikannya.
+    const n = parseNum(el.value), neg = /^\s*-/.test(el.value);
+    el.value = (neg ? '-' : '') + (n ? n.toLocaleString('id-ID') : '');
   }
 });
 document.addEventListener('change', ev => {
@@ -818,9 +964,18 @@ const actions = {
   'acc-save': d => {
     const name = $('#a-name').value.trim();
     if (!name) { toast('Isi nama platform'); return; }
-    const group = $('#a-group').value, balance = parseNum($('#a-bal').value);
-    if (d.id) Object.assign(acc(d.id), { name, group, balance });
-    else state.accounts.push({ id: uid(), name, group, balance });
+    const raw = $('#a-bal').value, group = $('#a-group').value;
+    const balance = (/^\s*-/.test(raw) ? -1 : 1) * parseNum(raw);
+    let a = acc(d.id);
+    if (!a) { a = { id: uid(), name, group, balance: 0 }; state.accounts.push(a); }
+    const delta = balance - a.balance;
+    if (delta) {
+      // Platform yang belum punya riwayat dianggap mengisi saldo awal.
+      const fresh = !a.balance && !accHistory(a.id).length;
+      const kind = fresh ? 'init' : group === 'invest' ? 'gain' : 'adj';
+      state.adjusts.push({ id: uid(), acc: a.id, amount: delta, kind, note: $('#a-note')?.value.trim() || '', date: today(), ts: Date.now() });
+    }
+    Object.assign(a, { name, group, balance });
     snapshot(); save(); closeSheet(); render();
   },
   'acc-delete': d => {
@@ -840,10 +995,38 @@ const actions = {
     if (from === to) { toast('Pilih dua platform yang berbeda'); return; }
     if (!n) { toast('Masukkan nominal'); return; }
     from.balance -= n; to.balance += n;
+    state.transfers.push({ id: uid(), from: from.id, to: to.id, amount: n, fee, date: today(), ts: Date.now() });
     if (fee) addExpense({ id: uid(), amount: fee, cat: adminCat().id, acc: from.id, note: `Transfer ke ${to.name}`, date: today(), ts: Date.now() });
     else { snapshot(); save(); }
     closeSheet(); render();
     toast(`${rp(n)} dipindah ke ${to.name}${fee ? ` · admin ${rp(fee)}` : ''}`);
+  },
+  'insight': () => insightSheet(),
+  'loan-new': () => loanNewSheet(),
+  'loan-view': d => loanViewSheet(d.id),
+  'loan-history': () => loanHistorySheet(),
+  'loan-save': () => {
+    const who = $('#l-who').value.trim(), amount = parseNum($('#l-amt').value), from = acc($('#l-from').value);
+    if (!who) { toast('Isi siapa yang meminjam'); return; }
+    if (!amount) { toast('Masukkan nominal'); return; }
+    from.balance -= amount;
+    state.loans.push({ id: uid(), who, amount, from: from.id, note: $('#l-note').value.trim(), date: $('#l-date').value || today(), ts: Date.now(), back: null });
+    snapshot(); save(); closeSheet(); render(); toast(`${who} pinjam ${rp(amount)}`);
+  },
+  'loan-back': d => {
+    const l = state.loans.find(x => x.id === d.id), to = acc($('#l-to').value);
+    if (!l || !to) return;
+    to.balance += l.amount;
+    l.back = { to: to.id, date: today(), ts: Date.now() };
+    snapshot(); save(); closeSheet(); render(); toast(`${rp(l.amount)} kembali ke ${to.name}`);
+  },
+  'loan-delete': d => {
+    const l = state.loans.find(x => x.id === d.id); if (!l) return;
+    if (!confirm('Hapus catatan piutang ini? Saldo platform dikembalikan seperti sebelum dicatat.')) return;
+    const f = acc(l.from); if (f) f.balance += l.amount;
+    if (l.back) { const t = acc(l.back.to); if (t) t.balance -= l.amount; }
+    state.loans = state.loans.filter(x => x !== l);
+    snapshot(); save(); closeSheet(); render();
   },
   'fee-quick': d => { const v = Number(d.v); $('#t-fee').value = v ? v.toLocaleString('id-ID') : ''; },
   'cat-edit': d => catSheet(d.id),
