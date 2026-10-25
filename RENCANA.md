@@ -28,7 +28,9 @@ Beranda · Laporan · Aset · Atur
 - Daftar platform per kelompok: Bank (BCA, BNI, Jago), Investasi (Bibit), Tunai / e-wallet
 - Total aset + grafik tren (riwayat disimpan tiap perubahan)
 - Pengeluaran mengurangi saldo sumber dana yang dipilih
-- Ubah saldo manual (gaji masuk, nilai investasi naik/turun) dan transfer antar platform
+- Pemasukan (Beranda → Catat pemasukan): jenis Gaji/Bonus/Jualan/Lainnya, pilih platform tujuan, menambah saldo. Tidak memengaruhi budget; tampil di Laporan sebagai total pemasukan dan baris hijau.
+- Ubah saldo manual (misalnya nilai investasi naik/turun)
+- Transfer antar platform dengan biaya admin opsional. Biaya admin dipotong dari platform asal dan dicatat sebagai pengeluaran kategori "Biaya admin" (cadangan), yang dibuat otomatis saat pertama dipakai.
 
 ## Atur
 - Ubah jatah harian dan cadangan bulanan
