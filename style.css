@@ -65,6 +65,12 @@ main { padding: 0 var(--gutter); max-width: 560px; margin: 0 auto; }
 .bar { height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden; margin-top: 12px; display: flex; }
 .bar i { display: block; height: 100%; background: var(--ink); }
 .bar i.over { background: var(--danger); }
+.insight {
+  display: flex; justify-content: space-between; align-items: center; width: 100%;
+  background: none; border: 0; border-top: 1px solid var(--line); margin-top: 12px; padding: 10px 0 0;
+  font-size: 13px; color: var(--muted); text-align: left;
+}
+.insight b { font-weight: 500; color: var(--ink); }
 .notice { border-color: var(--ink); }
 .notice .actions { margin-top: 10px; }
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -114,7 +120,7 @@ main { padding: 0 var(--gutter); max-width: 560px; margin: 0 auto; }
 .btn:active { transform: scale(.98); }
 .link { background: none; border: 0; color: var(--muted); font-size: 13px; padding: 4px 0; text-decoration: underline; text-underline-offset: 3px; }
 .actions { display: flex; gap: 8px; margin-top: 12px; }
-.actions .btn { flex: 1; }
+.actions .btn { flex: 1; padding-left: 8px; padding-right: 8px; }
 
 /* Segmented + period nav */
 .seg { display: flex; background: var(--sunk); border-radius: 12px; padding: 3px; margin-top: 8px; }
