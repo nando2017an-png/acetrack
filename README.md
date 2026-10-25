@@ -26,6 +26,8 @@ Setelah mengubah file, naikkan `VERSION` di `sw.js` (misalnya `acetrack-v2`), la
 
 ## Data
 
-- Data hanya tersimpan di HP (localStorage), tidak dikirim ke mana pun.
-- Backup rutin lewat tab Atur → Backup. File `acetrack-backup-YYYY-MM-DD.json` bisa dipulihkan lewat Restore.
-- Menghapus data situs Chrome atau uninstall aplikasi akan menghapus data. Backup dulu.
+- Data tersimpan di HP (localStorage). Menghapus data situs Chrome atau uninstall aplikasi akan menghapusnya.
+- **Backup otomatis ke GitHub** (opsional): tab Atur → Hubungkan GitHub. Data dikirim ke `acetrack-backup.json` di repo private `acetrack-data` setiap aplikasi dibuka dan setelah ada perubahan (paling sering 30 menit sekali). Token disimpan terpisah dan tidak ikut ke file backup. Repo public ditolak.
+- **Backup file**: tab Atur → Backup membuka menu Bagikan Android (file `.txt` berisi JSON). Restore menerima `.txt` maupun `.json`.
+- **Salinan harian**: 7 salinan terakhir kondisi awal hari, untuk membatalkan salah hapus. Ada di HP yang sama, jadi bukan pengganti backup.
+- Peringatan backup muncul di Beranda kalau sudah 3 hari belum backup; "Nanti" menunda 2 hari.
