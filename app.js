@@ -56,10 +56,21 @@ function defaults() {
   };
 }
 
-let state;
-try { state = JSON.parse(localStorage.getItem(KEY)) || defaults(); } catch { state = defaults(); }
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { toast('Gagal menyimpan. Penyimpanan HP penuh?'); } };
-save();
+const META = 'acetrack.meta', GHK = 'acetrack.gh', SNAPK = 'acetrack.snapshots';
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch { return d; } };
+const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+
+let state = load(KEY, null) || defaults();
+// meta & token GitHub disimpan terpisah supaya tidak ikut ke file backup
+let meta = load(META, {});
+let gh = load(GHK, null);
+store(KEY, state);
+const save = () => {
+  if (!store(KEY, state)) toast('Gagal menyimpan. Penyimpanan HP penuh?');
+  meta.dirty = true; store(META, meta); syncSoon();
+};
+const validBackup = d => d && Array.isArray(d.expenses) && Array.isArray(d.categories) && Array.isArray(d.accounts) && d.settings;
+function replaceState(d) { state = d; save(); applyTheme(); render(); }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 const cat = id => state.categories.find(c => c.id === id);
@@ -134,8 +145,16 @@ function viewHome() {
   const mb = monthBudget(t.slice(0, 7));
   const pct = Math.min(100, D ? spent / D * 100 : 0);
   const recent = [...state.expenses].sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts).slice(0, 5);
+  const due = backupDue();
 
   return `
+  ${due ? `<div class="card notice">
+    <p class="label" style="color:inherit">Sudah ${due} hari belum backup</p>
+    <div class="actions">
+      <button class="btn" data-act="snooze">Nanti</button>
+      <button class="btn primary" data-act="${gh ? 'gh-push' : 'export'}" style="flex:2">Backup sekarang</button>
+    </div>
+  </div>` : ''}
   <div class="card">
     <p class="label">Sisa jatah hari ini</p>
     <p class="big num ${left < 0 ? 'danger' : ''}">${rp(Math.max(0, left))}</p>
@@ -463,16 +482,39 @@ function viewSettings() {
       `<button class="${s.theme === k ? 'on' : ''}" data-act="theme" data-t="${k}">${l}</button>`).join('')}
   </div>
 
-  <h2>Data</h2>
+  <h2>Backup otomatis (GitHub)</h2>
   <div class="card" style="margin-top:0">
-    <p class="small" style="margin-top:0">Data hanya tersimpan di HP ini. Backup rutin supaya tidak hilang kalau data Chrome terhapus.</p>
+    ${gh ? `
+    <p class="label">Tersambung ke <b>${esc(gh.repo)}</b></p>
+    <p class="small" id="gh-status">${ghStatus()}</p>
+    <div class="actions">
+      <button class="btn" data-act="gh-push">Backup</button>
+      <button class="btn" data-act="gh-restore">Pulihkan</button>
+    </div>
+    <button class="link" data-act="gh-off" style="margin-top:12px">Putuskan sambungan</button>` : `
+    <p class="small" style="margin-top:0">Kirim data otomatis ke repo GitHub private, supaya aman kalau HP rusak, ganti HP, atau data Chrome terhapus.</p>
+    <div class="actions"><button class="btn" data-act="gh-setup">Hubungkan GitHub</button></div>`}
+  </div>
+
+  <h2>Backup file</h2>
+  <div class="card" style="margin-top:0">
+    <p class="small" style="margin-top:0">${meta.lastAt ? `Backup terakhir ${ago(meta.lastAt)}.` : 'Belum pernah backup.'} Backup membuka menu Bagikan, jadi file bisa langsung dikirim ke Drive atau WhatsApp.</p>
     <div class="actions">
       <button class="btn" data-act="export">Backup</button>
       <button class="btn" data-act="import">Restore</button>
     </div>
-    <input type="file" id="import-file" accept="application/json,.json" hidden>
-    <button class="link" data-act="reset" style="margin-top:12px">Hapus semua data</button>
+    <input type="file" id="import-file" accept="application/json,.json,text/plain,.txt" hidden>
   </div>
+
+  <h2>Salinan harian di HP</h2>
+  <div class="list">
+    ${Object.entries(load(SNAPK, {})).sort((a, b) => b[0].localeCompare(a[0])).map(([d, s]) => `
+      <button class="row" data-act="snap-restore" data-d="${d}">
+        <span class="grow"><p class="t">${longDate(d)}</p><p class="s">${s.expenses.length} catatan · kondisi awal hari</p></span>
+        <span class="s">Pulihkan</span></button>`).join('') || '<p class="empty">Belum ada salinan.</p>'}
+  </div>
+  <p class="small">Untuk membatalkan salah hapus. Disimpan di HP yang sama, jadi bukan pengganti backup.</p>
+  <button class="link" data-act="reset" style="margin-top:12px">Hapus semua data</button>
 
   <h2>Tentang</h2>
   <div class="card" style="margin-top:0">
@@ -484,7 +526,7 @@ function viewSettings() {
       <text x="430" y="205" style="font:700 88px 'Space Grotesk',sans-serif">AceCore</text>
       <text x="434" y="268" style="font:500 34px 'JetBrains Mono',monospace;letter-spacing:16px">NEXUS</text>
     </svg>
-    <p class="small">AceTrack v1.0 · pencatat pengeluaran dan aset pribadi</p>
+    <p class="small">AceTrack v1.1 · pencatat pengeluaran dan aset pribadi</p>
   </div>`;
 }
 function catSheet(id) {
@@ -509,6 +551,116 @@ function applyTheme() {
   const t = state.settings.theme;
   if (t === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
+}
+
+/* ---------- Backup ---------- */
+const DAY_MS = 864e5;
+const hhmm = (ts = Date.now()) => { const d = new Date(ts); return `${pad2(d.getHours())}.${pad2(d.getMinutes())}`; };
+function ago(ts) {
+  const m = Math.floor((Date.now() - ts) / 6e4);
+  if (m < 1) return 'baru saja';
+  if (m < 60) return `${m} menit lalu`;
+  if (m < 1440) return `${Math.floor(m / 60)} jam lalu`;
+  return `${Math.floor(m / 1440)} hari lalu`;
+}
+
+// Salinan harian di HP: diambil saat aplikasi pertama dibuka tiap hari, simpan 7 terakhir.
+function dailySnapshot() {
+  const snaps = load(SNAPK, {}), t = today();
+  if (snaps[t]) return;
+  snaps[t] = state;
+  const keys = Object.keys(snaps).sort();
+  while (keys.length > 7) delete snaps[keys.shift()];
+  while (!store(SNAPK, snaps) && keys.length > 1) delete snaps[keys.shift()];
+}
+
+// Peringatan muncul kalau sudah 3 hari belum backup; "Nanti" menunda 2 hari.
+function backupDue() {
+  if (!state.expenses.length || Date.now() < (meta.snooze || 0)) return 0;
+  const ref = meta.lastAt || parse(state.start).getTime();
+  const days = Math.floor((Date.now() - ref) / DAY_MS);
+  return days >= 3 ? days : 0;
+}
+function backupDone() { meta.lastAt = Date.now(); meta.snooze = 0; store(META, meta); }
+
+function download(text, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+// Chrome Android hanya mau membagikan tipe file tertentu, jadi backup dibagikan sebagai .txt
+async function exportBackup() {
+  const json = JSON.stringify(state, null, 1), name = `acetrack-backup-${today()}`;
+  const file = new File([json], name + '.txt', { type: 'text/plain' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: 'Backup AceTrack' }); }
+    catch (e) { if (e.name === 'AbortError') return; download(json, name + '.json'); }
+  } else download(json, name + '.json');
+  backupDone(); render(); toast('Backup dibuat');
+}
+
+// Sinkron ke file acetrack-backup.json di repo GitHub private.
+const GH_FILE = 'acetrack-backup.json';
+const b64enc = s => {
+  const b = new TextEncoder().encode(s); let bin = '';
+  for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const ghReq = (path, opts = {}) => fetch(`https://api.github.com/repos/${gh.repo}${path}`, {
+  method: opts.method || 'GET', body: opts.body, cache: 'no-store',
+  headers: { Authorization: `Bearer ${gh.token}`, Accept: opts.accept || 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+});
+const ghErr = s => ({
+  401: 'Token tidak valid atau sudah kedaluwarsa',
+  403: 'Token tidak punya izin tulis ke repo ini',
+  404: 'Repo tidak ditemukan atau token tidak punya akses',
+}[s] || `GitHub menolak (kode ${s})`);
+
+let syncing = false, syncTimer;
+// Paling sering sekali tiap 30 menit, supaya riwayat commit tidak kebanjiran.
+function syncSoon(delay) {
+  if (!gh) return;
+  clearTimeout(syncTimer);
+  const wait = delay ?? Math.max(15000, (meta.lastGh || 0) + 30 * 6e4 - Date.now());
+  syncTimer = setTimeout(() => pushGh(false), wait);
+}
+async function pushGh(manual) {
+  if (!gh || syncing) return;
+  syncing = true;
+  try {
+    const put = sha => ghReq(`/contents/${GH_FILE}`, {
+      method: 'PUT',
+      body: JSON.stringify({ message: `Backup ${today()} ${hhmm()}`, content: b64enc(JSON.stringify(state, null, 1)), ...(sha ? { sha } : {}) }),
+    });
+    let r = await put(meta.ghSha);
+    if (r.status === 409 || r.status === 422) {
+      const g = await ghReq(`/contents/${GH_FILE}`);
+      r = await put(g.ok ? (await g.json()).sha : undefined);
+    }
+    if (!r.ok) throw new Error(ghErr(r.status));
+    meta.ghSha = (await r.json()).content.sha;
+    meta.lastGh = meta.lastAt = Date.now(); meta.dirty = false; meta.ghError = ''; meta.snooze = 0;
+    if (manual) toast('Tersimpan ke GitHub');
+  } catch (e) {
+    meta.ghError = e instanceof TypeError ? 'Tidak ada internet, dicoba lagi nanti' : e.message;
+    if (manual) toast(meta.ghError);
+  } finally {
+    syncing = false; store(META, meta);
+    const el = $('#gh-status'); if (el) el.innerHTML = ghStatus();
+  }
+}
+function ghStatus() {
+  if (meta.ghError) return `<span class="danger">${esc(meta.ghError)}</span>`;
+  return meta.lastGh ? `Backup terakhir ke GitHub ${ago(meta.lastGh)}` : 'Belum pernah backup ke GitHub';
+}
+function ghSheet() {
+  openSheet(`
+  <h3>Backup otomatis ke GitHub</h3>
+  <p class="small">Data dikirim ke repo <b>private</b> milikmu setiap aplikasi dibuka dan setelah ada perubahan (paling sering 30 menit sekali). Token hanya disimpan di HP ini dan tidak ikut ke file backup.</p>
+  <label class="field"><span>Repo (username/nama-repo)</span><input class="in" id="g-repo" placeholder="username/acetrack-data" value="${esc(gh?.repo || '')}" autocapitalize="off" autocomplete="off" spellcheck="false"></label>
+  <label class="field"><span>Fine-grained token</span><input class="in" id="g-token" type="password" placeholder="github_pat_…" autocomplete="off"></label>
+  <div class="actions"><button class="btn primary" data-act="gh-connect">Hubungkan</button></div>`);
 }
 
 /* ---------- Sheet & toast ---------- */
@@ -546,9 +698,9 @@ document.addEventListener('change', ev => {
   if (el.id === 'import-file' && el.files[0]) {
     el.files[0].text().then(txt => {
       const d = JSON.parse(txt);
-      if (!d || !Array.isArray(d.expenses) || !Array.isArray(d.categories) || !d.settings) throw new Error();
+      if (!validBackup(d)) throw new Error();
       if (!confirm('Restore akan mengganti semua data di HP ini dengan isi backup. Lanjut?')) return;
-      state = d; save(); applyTheme(); render(); toast('Data dipulihkan');
+      replaceState(d); toast('Data dipulihkan');
     }).catch(() => toast('File backup tidak valid'));
     el.value = '';
   }
@@ -619,18 +771,52 @@ const actions = {
     save(); closeSheet(); render();
   },
   'theme': d => { state.settings.theme = d.t; save(); applyTheme(); render(); },
-  'export': () => {
-    const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = `acetrack-backup-${today()}.json`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  },
+  'export': () => exportBackup(),
   'import': () => $('#import-file').click(),
+  'snooze': () => { meta.snooze = Date.now() + 2 * DAY_MS; store(META, meta); render(); },
+  'snap-restore': d => {
+    const s = load(SNAPK, {})[d.d];
+    if (!validBackup(s)) { toast('Salinan rusak'); return; }
+    if (!confirm(`Kembalikan data ke kondisi awal ${longDate(d.d)}? Catatan setelahnya akan hilang.`)) return;
+    replaceState(s); toast('Data dipulihkan');
+  },
+  'gh-setup': () => ghSheet(),
+  'gh-connect': async () => {
+    const repo = $('#g-repo').value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
+    const token = $('#g-token').value.trim();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Tulis repo sebagai username/nama-repo'); return; }
+    if (!token) { toast('Tempel token dulu'); return; }
+    const prev = gh; gh = { repo, token };
+    try {
+      const r = await ghReq('');
+      if (!r.ok) throw new Error(ghErr(r.status));
+      if (!(await r.json()).private) throw new Error('Repo ini public. Pakai repo private supaya datamu tidak terbuka.');
+    } catch (e) {
+      gh = prev; toast(e instanceof TypeError ? 'Tidak ada internet' : e.message); return;
+    }
+    store(GHK, gh); meta.ghSha = undefined; meta.ghError = ''; store(META, meta);
+    closeSheet(); render();
+    await pushGh(true);
+  },
+  'gh-push': () => pushGh(true).then(() => { if (tab === 'beranda') render(); }),
+  'gh-restore': async () => {
+    try {
+      const r = await ghReq(`/contents/${GH_FILE}`, { accept: 'application/vnd.github.raw+json' });
+      if (!r.ok) throw new Error(r.status === 404 ? 'Belum ada backup di repo ini' : ghErr(r.status));
+      const d = await r.json();
+      if (!validBackup(d)) throw new Error('Isi backup di GitHub tidak valid');
+      if (!confirm(`Ganti data di HP ini dengan backup GitHub (${d.expenses.length} catatan)?`)) return;
+      replaceState(d); toast('Data dipulihkan dari GitHub');
+    } catch (e) { toast(e instanceof TypeError ? 'Tidak ada internet' : e.message); }
+  },
+  'gh-off': () => {
+    if (!confirm('Putuskan backup otomatis? Data di GitHub tetap ada.')) return;
+    gh = null; localStorage.removeItem(GHK); clearTimeout(syncTimer); render();
+  },
   'reset': () => {
     if (!confirm('Hapus SEMUA catatan, aset, dan pengaturan? Tidak bisa dibatalkan.')) return;
     if (!confirm('Yakin? Sebaiknya backup dulu.')) return;
-    state = defaults(); save(); applyTheme(); render(); toast('Data direset');
+    replaceState(defaults()); toast('Data direset');
   },
 };
 document.addEventListener('click', ev => {
@@ -642,7 +828,10 @@ document.addEventListener('click', ev => {
 
 /* ---------- Mulai ---------- */
 applyTheme();
+dailySnapshot();
 route();
+if (gh && (meta.dirty || !meta.lastGh || ymd(new Date(meta.lastGh)) !== today())) syncSoon(3000);
+window.addEventListener('online', () => { if (meta.dirty) syncSoon(3000); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
