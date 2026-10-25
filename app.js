@@ -608,11 +608,13 @@ function loanNewSheet() {
   <label class="field"><span>Dipinjam oleh</span><input class="in" id="l-who" placeholder="Rafi" maxlength="24"></label>
   <label class="field"><span>Nominal (Rp)</span><input class="in num" id="l-amt" inputmode="numeric" placeholder="0" data-money></label>
   <label class="field"><span>Diambil dari</span><select class="in" id="l-from">${accOpts(state.lastAcc)}</select></label>
+  <label class="field"><span>Biaya admin (Rp)</span><input class="in num" id="l-fee" inputmode="numeric" placeholder="0" data-money></label>
+  ${feeChips('l-fee')}
   <div class="meta">
     <input class="in" id="l-note" placeholder="Catatan (opsional)" maxlength="60">
     <input class="in" id="l-date" type="date" value="${today()}" style="flex:0 0 150px">
   </div>
-  <p class="small">Saldo platform berkurang, tapi total aset tetap karena uangnya masih milikmu. Tidak dihitung sebagai pengeluaran.</p>
+  <p class="small">Saldo platform berkurang, tapi total aset tetap karena uangnya masih milikmu. Pinjamannya tidak dihitung sebagai pengeluaran; biaya admin dicatat sebagai pengeluaran "Biaya admin" (cadangan).</p>
   <div class="actions"><button class="btn primary" data-act="loan-save">Simpan</button></div>`);
 }
 function loanViewSheet(id) {
@@ -620,7 +622,7 @@ function loanViewSheet(id) {
   openSheet(`
   <h3>${esc(l.who)}<span class="small" style="margin:0 0 0 auto">${l.back ? 'Sudah kembali' : 'Belum kembali'}</span></h3>
   <p class="amount num">${rp(l.amount)}</p>
-  <p class="small">Dipinjam ${longDate(l.date)} dari ${esc(acc(l.from)?.name || '?')}${l.note ? ` · ${esc(l.note)}` : ''}</p>
+  <p class="small">Dipinjam ${longDate(l.date)} dari ${esc(acc(l.from)?.name || '?')}${l.fee ? ` · admin ${rp(l.fee)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}</p>
   ${l.back
     ? `<p class="small">Dikembalikan ${longDate(l.back.date)} ke ${esc(acc(l.back.to)?.name || '?')}</p>
        <div class="actions"><button class="btn danger-btn" data-act="loan-delete" data-id="${id}">Hapus catatan</button></div>`
@@ -639,6 +641,9 @@ function loanHistorySheet() {
     <span class="grow"><p class="t">${esc(l.who)}</p><p class="s">${midDate(l.date)} → ${midDate(l.back.date)} · ke ${esc(acc(l.back.to)?.name || '?')}</p></span>
     <span class="v num">${rp(l.amount)}</span></button>`).join('')}</div>`);
 }
+const feeChips = target => `<div class="chips">
+    ${[0, 1000, 2500, 6500].map(v => `<button class="chip" data-act="fee-quick" data-target="${target}" data-v="${v}">${v ? rp(v) : 'Gratis'}</button>`).join('')}
+  </div>`;
 const accOpts = sel => state.accounts.map(a => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)} (${short(a.balance)})</option>`).join('');
 function trend(keys) {
   const pts = keys.slice(-90).map(k => state.snaps[k]);
@@ -672,9 +677,7 @@ function transferSheet() {
   <label class="field"><span>Ke</span><select class="in" id="t-to">${accOpts(state.accounts[1]?.id)}</select></label>
   <label class="field"><span>Nominal (Rp)</span><input class="in num" id="t-amt" inputmode="numeric" placeholder="0" data-money></label>
   <label class="field"><span>Biaya admin (Rp)</span><input class="in num" id="t-fee" inputmode="numeric" placeholder="0" data-money></label>
-  <div class="chips">
-    ${[0, 1000, 2500, 6500].map(v => `<button class="chip" data-act="fee-quick" data-v="${v}">${v ? rp(v) : 'Gratis'}</button>`).join('')}
-  </div>
+  ${feeChips('t-fee')}
   <p class="small">Biaya admin dipotong dari platform asal dan dicatat sebagai pengeluaran "Biaya admin" (cadangan).</p>
   <div class="actions"><button class="btn primary" data-act="transfer-save">Transfer</button></div>`);
 }
@@ -748,7 +751,7 @@ function viewSettings() {
       <text x="430" y="205" style="font:700 88px 'Space Grotesk',sans-serif">AceCore</text>
       <text x="434" y="268" style="font:500 34px 'JetBrains Mono',monospace;letter-spacing:16px">NEXUS</text>
     </svg>
-    <p class="small">AceTrack v1.3 · pencatat pengeluaran dan aset pribadi</p>
+    <p class="small">AceTrack v1.3.1 · pencatat pengeluaran dan aset pribadi</p>
   </div>`;
 }
 function catSheet(id) {
@@ -1009,9 +1012,16 @@ const actions = {
     const who = $('#l-who').value.trim(), amount = parseNum($('#l-amt').value), from = acc($('#l-from').value);
     if (!who) { toast('Isi siapa yang meminjam'); return; }
     if (!amount) { toast('Masukkan nominal'); return; }
+    const fee = parseNum($('#l-fee').value), date = $('#l-date').value || today();
     from.balance -= amount;
-    state.loans.push({ id: uid(), who, amount, from: from.id, note: $('#l-note').value.trim(), date: $('#l-date').value || today(), ts: Date.now(), back: null });
-    snapshot(); save(); closeSheet(); render(); toast(`${who} pinjam ${rp(amount)}`);
+    const loan = { id: uid(), who, amount, from: from.id, note: $('#l-note').value.trim(), date, ts: Date.now(), back: null, fee, feeExp: null };
+    state.loans.push(loan);
+    if (fee) {
+      // Disimpan id-nya supaya ikut terhapus kalau catatan piutang dihapus.
+      loan.feeExp = uid();
+      addExpense({ id: loan.feeExp, amount: fee, cat: adminCat().id, acc: from.id, note: `Pinjamkan ke ${who}`, date, ts: Date.now() });
+    } else { snapshot(); save(); }
+    closeSheet(); render(); toast(`${who} pinjam ${rp(amount)}${fee ? ` · admin ${rp(fee)}` : ''}`);
   },
   'loan-back': d => {
     const l = state.loans.find(x => x.id === d.id), to = acc($('#l-to').value);
@@ -1026,9 +1036,10 @@ const actions = {
     const f = acc(l.from); if (f) f.balance += l.amount;
     if (l.back) { const t = acc(l.back.to); if (t) t.balance -= l.amount; }
     state.loans = state.loans.filter(x => x !== l);
+    if (l.feeExp) removeExpense(l.feeExp);
     snapshot(); save(); closeSheet(); render();
   },
-  'fee-quick': d => { const v = Number(d.v); $('#t-fee').value = v ? v.toLocaleString('id-ID') : ''; },
+  'fee-quick': d => { const v = Number(d.v); $('#' + d.target).value = v ? v.toLocaleString('id-ID') : ''; },
   'cat-edit': d => catSheet(d.id),
   'cat-save': d => {
     const name = $('#c-name').value.trim();
