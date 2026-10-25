@@ -9,7 +9,8 @@ Beranda · Laporan · Aset · Atur
 - Sisa jatah hari ini (progress bar) dan sisa cadangan bulan ini
 - Grid kategori. Tap kategori → numpad besar muncul dari bawah
 - Numpad: tombol cepat 2rb / 5rb / 10rb, tombol "000", pilihan sumber dana (default = terakhir dipakai), catatan opsional, tanggal (default hari ini)
-- 3 catatan terakhir (tap untuk edit/hapus)
+- 5 catatan terakhir (tap untuk edit/hapus)
+- Satu baris "Proyeksi akhir bulan" di kartu cadangan (muncul setelah 3 hari mencatat). Tap → ringkasan: proyeksi, rata-rata harian, hemat berturut-turut, hari paling boros, kategori terbesar.
 
 ## Model budget
 - Jatah harian (default Rp 50.000) dan cadangan bulanan (default Rp 1.500.000), terpisah. Keduanya bisa diubah.
@@ -29,7 +30,8 @@ Beranda · Laporan · Aset · Atur
 - Total aset + grafik tren (riwayat disimpan tiap perubahan)
 - Pengeluaran mengurangi saldo sumber dana yang dipilih
 - Pemasukan (Beranda → Catat pemasukan): jenis Gaji/Bonus/Jualan/Lainnya, pilih platform tujuan, menambah saldo. Tidak memengaruhi budget; tampil di Laporan sebagai total pemasukan dan baris hijau.
-- Ubah saldo manual (misalnya nilai investasi naik/turun)
+- Ubah saldo manual: selisihnya dicatat sebagai "Penyesuaian" (bank/e-wallet/tunai, tampil di Laporan sebagai "di luar catatan") atau "Nilai naik/turun" (investasi, tampil di kartu Total aset). Pengisian pertama dicatat sebagai "Saldo awal". Tap platform menampilkan 10 riwayat terakhir.
+- Piutang (tombol Pinjamkan): siapa, nominal, diambil dari platform mana. "Sudah dikembalikan" memilih platform tujuan. Piutang tetap dihitung dalam total aset dan tidak dianggap pengeluaran.
 - Transfer antar platform dengan biaya admin opsional. Biaya admin dipotong dari platform asal dan dicatat sebagai pengeluaran kategori "Biaya admin" (cadangan), yang dibuat otomatis saat pertama dipakai.
 
 ## Atur
